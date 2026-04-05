@@ -48,7 +48,7 @@ def index_post():
 
 @urls_bp.route("/shorten", methods=["POST"])
 def shorten():
-    data = request.get_json()
+    data = request.get_json(silent=True)
     original_url = ((data.get("url") or "").strip()) if data else ""
 
     if not original_url or not is_valid_url(original_url):
