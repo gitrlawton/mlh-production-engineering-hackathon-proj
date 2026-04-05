@@ -5,22 +5,27 @@ from app.models.url import Url
 
 
 @pytest.fixture
-def client():
-    app = create_app()
-    app.config["TESTING"] = True
+def app():
+    _app = create_app()
+    _app.config["TESTING"] = True
 
-    with app.app_context():
+    with _app.app_context():
         db.connect(reuse_if_open=True)
         db.create_tables([Url], safe=True)
         db.close()
 
-    with app.test_client() as client:
-        yield client
+    yield _app
 
-    with app.app_context():
+    with _app.app_context():
         db.connect(reuse_if_open=True)
         Url.delete().execute()
         db.close()
+
+
+@pytest.fixture
+def client(app):
+    with app.test_client() as client:
+        yield client
 
 
 # --- /health ---

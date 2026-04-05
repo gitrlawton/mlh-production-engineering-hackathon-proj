@@ -42,4 +42,4 @@ jobs:
           DATABASE_PORT: 5432
           DATABASE_USER: postgres
           DATABASE_PASSWORD: postgres
-        run: uv run pytest tests/ -v
+        run: uv run pytest tests/ -v --cov=app --cov-report=term-missing --cov-fail-under=50
