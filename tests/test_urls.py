@@ -1,14 +1,26 @@
 import pytest
-from unittest.mock import MagicMock, patch
 from app import create_app
+from app.database import db
+from app.models.url import Url
 
 
 @pytest.fixture
 def client():
     app = create_app()
     app.config["TESTING"] = True
+
+    with app.app_context():
+        db.connect(reuse_if_open=True)
+        db.create_tables([Url], safe=True)
+        db.close()
+
     with app.test_client() as client:
         yield client
+
+    with app.app_context():
+        db.connect(reuse_if_open=True)
+        Url.delete().execute()
+        db.close()
 
 
 # --- /health ---
@@ -30,15 +42,10 @@ def test_index(client):
 # --- POST /shorten (JSON API) ---
 
 def test_shorten_valid_url(client):
-    mock_url = MagicMock()
-    mock_url.short_code = "abc123"
-
-    with patch("app.routes.urls.Url.create", return_value=mock_url):
-        response = client.post(
-            "/shorten",
-            json={"url": "https://www.example.com"}
-        )
-
+    response = client.post(
+        "/shorten",
+        json={"url": "https://www.example.com"}
+    )
     assert response.status_code == 201
     data = response.get_json()
     assert "short_code" in data
@@ -54,21 +61,17 @@ def test_shorten_missing_url(client):
 # --- GET /<short_code> ---
 
 def test_redirect_valid_short_code(client):
-    mock_url = MagicMock()
-    mock_url.original_url = "https://www.example.com"
-
-    with patch("app.routes.urls.Url.get", return_value=mock_url):
-        response = client.get("/abc123")
-
+    post_response = client.post(
+        "/shorten",
+        json={"url": "https://www.example.com"}
+    )
+    short_code = post_response.get_json()["short_code"]
+    response = client.get(f"/{short_code}")
     assert response.status_code == 302
     assert "example.com" in response.headers["Location"]
 
 
 def test_redirect_invalid_short_code(client):
-    from peewee import DoesNotExist
-
-    with patch("app.routes.urls.Url.get", side_effect=DoesNotExist):
-        response = client.get("/notfound")
-
+    response = client.get("/notfound")
     assert response.status_code == 404
     assert "error" in response.get_json()

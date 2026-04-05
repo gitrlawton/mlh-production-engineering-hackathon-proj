@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venv/Scripts/python -m pytest tests/ -v)",
+      "WebSearch",
+      "WebFetch(domain:docs.peewee-orm.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:medium.com)",
+      "WebFetch(domain:www.dvlv.co.uk)",
+      "WebFetch(domain:julianrawcliffe.wordpress.com)",
+      "WebFetch(domain:stewartadam.io)",
+      "WebFetch(domain:docs.github.com)",
+      "WebFetch(domain:til.simonwillison.net)"
+    ]
+  }
+}
