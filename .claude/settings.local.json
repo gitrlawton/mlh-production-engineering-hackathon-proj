@@ -10,7 +10,8 @@
       "WebFetch(domain:julianrawcliffe.wordpress.com)",
       "WebFetch(domain:stewartadam.io)",
       "WebFetch(domain:docs.github.com)",
-      "WebFetch(domain:til.simonwillison.net)"
+      "WebFetch(domain:til.simonwillison.net)",
+      "Bash(uv run:*)"
     ]
   }
 }

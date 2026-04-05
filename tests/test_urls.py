@@ -93,7 +93,7 @@ def test_ui_form_valid_url(client):
 def test_ui_form_missing_url(client):
     response = client.post("/", data={})
     assert response.status_code == 200
-    assert b"A URL is required" in response.data
+    assert b"A valid URL is required" in response.data
 
 
 # --- Graceful failure ---
