@@ -80,3 +80,35 @@ def test_redirect_invalid_short_code(client):
     response = client.get("/notfound")
     assert response.status_code == 404
     assert "error" in response.get_json()
+
+
+# --- POST / (UI form) ---
+
+def test_ui_form_valid_url(client):
+    response = client.post("/", data={"url": "https://www.example.com"})
+    assert response.status_code == 200
+    assert b"URL Shortener" in response.data
+
+
+def test_ui_form_missing_url(client):
+    response = client.post("/", data={})
+    assert response.status_code == 200
+    assert b"A URL is required" in response.data
+
+
+# --- Graceful failure ---
+
+def test_unregistered_route_returns_json_404(client):
+    response = client.get("/this/route/does/not/exist")
+    assert response.status_code == 404
+    assert response.get_json() == {"error": "not found"}
+
+
+def test_500_returns_json(client, app):
+    from unittest.mock import patch
+    app.config["PROPAGATE_EXCEPTIONS"] = False
+    with patch("app.routes.urls.Url.create", side_effect=Exception("db failure")):
+        response = client.post("/shorten", json={"url": "https://www.example.com"})
+    assert response.status_code == 500
+    assert response.get_json() == {"error": "internal server error"}
+    app.config["PROPAGATE_EXCEPTIONS"] = True
