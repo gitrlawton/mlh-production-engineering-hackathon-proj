@@ -1,0 +1,7 @@
+service_down:
+  check_interval_seconds: 30
+
+high_error_rate:
+  check_interval_seconds: 30
+  threshold_percent: 10
+  window_requests: 100

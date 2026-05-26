@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Alert Dashboard</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #f5f5f5;
+      min-height: 100vh;
+      padding: 2rem;
+    }
+
+    .card {
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+      padding: 2.5rem;
+      max-width: 680px;
+      margin: 0 auto;
+    }
+
+    h1 { font-size: 1.6rem; color: #1a1a1a; margin-bottom: 0.4rem; }
+    .subtitle { color: #666; font-size: 0.95rem; margin-bottom: 1.5rem; }
+
+    .notify-row {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      margin-bottom: 2rem;
+    }
+
+    .notify-status { font-size: 0.85rem; color: #666; }
+
+    button {
+      padding: 0.5rem 1rem;
+      background: #4f46e5;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    button:hover { background: #4338ca; }
+    button:disabled { background: #a5b4fc; cursor: default; }
+
+    .status-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+      margin-bottom: 2rem;
+    }
+
+    .status-card {
+      border: 1.5px solid #e5e7eb;
+      border-radius: 8px;
+      padding: 1.25rem;
+    }
+
+    .status-label {
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: #6b7280;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: 0.6rem;
+    }
+
+    .status-value {
+      font-size: 1.4rem;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      background: #d1d5db;
+    }
+    .dot.green { background: #22c55e; }
+    .dot.red { background: #ef4444; }
+
+    .ok { color: #15803d; }
+    .err { color: #991b1b; }
+    .muted { color: #9ca3af; }
+
+    h2 { font-size: 0.95rem; font-weight: 600; color: #374151; margin-bottom: 0.75rem; }
+
+    .alert-log {
+      border: 1.5px solid #e5e7eb;
+      border-radius: 8px;
+      overflow: hidden;
+      min-height: 60px;
+    }
+
+    .alert-entry {
+      padding: 0.65rem 1rem;
+      border-bottom: 1px solid #f3f4f6;
+      font-size: 0.85rem;
+      display: flex;
+      gap: 0.75rem;
+      align-items: baseline;
+    }
+    .alert-entry:last-child { border-bottom: none; }
+
+    .alert-time { color: #9ca3af; font-size: 0.8rem; white-space: nowrap; }
+    .alert-level { font-weight: 700; min-width: 4rem; }
+    .level-ERROR { color: #991b1b; }
+    .level-WARNING { color: #92400e; }
+    .level-INFO { color: #1d4ed8; }
+
+    .empty { padding: 1rem; color: #9ca3af; font-size: 0.875rem; text-align: center; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Alert Dashboard</h1>
+    <p class="subtitle">Live monitoring — checks every 30 seconds.</p>
+
+    <div class="notify-row">
+      <button id="notify-btn" onclick="requestPermission()">Enable Desktop Notifications</button>
+      <span class="notify-status" id="notify-status"></span>
+    </div>
+
+    <div class="status-grid">
+      <div class="status-card">
+        <div class="status-label">Service Health</div>
+        <div class="status-value">
+          <span class="dot" id="health-dot"></span>
+          <span id="health-text" class="muted">—</span>
+        </div>
+      </div>
+      <div class="status-card">
+        <div class="status-label">Error Rate</div>
+        <div class="status-value">
+          <span class="dot" id="error-dot"></span>
+          <span id="error-text" class="muted">—</span>
+        </div>
+      </div>
+    </div>
+
+    <h2>Alert History</h2>
+    <div class="alert-log" id="alert-log">
+      <div class="empty" id="empty-msg">No alerts yet.</div>
+    </div>
+  </div>
+
+  <script>
+    let config = {
+      service_down: { check_interval_seconds: 30 },
+      high_error_rate: { check_interval_seconds: 30, threshold_percent: 10 }
+    };
+    let prevHealthy = null;
+    let prevHighError = false;
+
+    function updateNotifyUI() {
+      const btn = document.getElementById('notify-btn');
+      const status = document.getElementById('notify-status');
+      if (!('Notification' in window)) {
+        status.textContent = 'Not supported in this browser.';
+        btn.disabled = true;
+        return;
+      }
+      if (Notification.permission === 'granted') {
+        status.textContent = 'Enabled';
+        btn.disabled = true;
+        btn.textContent = 'Notifications Enabled';
+      } else if (Notification.permission === 'denied') {
+        status.textContent = 'Blocked — allow in browser site settings.';
+        btn.disabled = true;
+      } else {
+        status.textContent = 'Not yet enabled.';
+      }
+    }
+
+    async function requestPermission() {
+      await Notification.requestPermission();
+      updateNotifyUI();
+    }
+
+    function notify(title, body) {
+      if (Notification.permission === 'granted') {
+        new Notification(title, { body });
+      }
+    }
+
+    function addEntry(level, message) {
+      const log = document.getElementById('alert-log');
+      const empty = document.getElementById('empty-msg');
+      if (empty) empty.remove();
+
+      const time = new Date().toLocaleTimeString();
+      const el = document.createElement('div');
+      el.className = 'alert-entry';
+      el.innerHTML =
+        `<span class="alert-time">${time}</span>` +
+        `<span class="alert-level level-${level}">${level}</span>` +
+        `<span>${message}</span>`;
+      log.insertBefore(el, log.firstChild);
+    }
+
+    async function checkStatus() {
+      let data;
+      try {
+        const res = await fetch('/alerts/status');
+        data = await res.json();
+      } catch (_) {
+        if (prevHealthy !== false) {
+          notify('Service Down', 'Could not reach the server.');
+          addEntry('ERROR', 'Service unreachable — fetch failed');
+        }
+        document.getElementById('health-dot').className = 'dot red';
+        document.getElementById('health-text').textContent = 'Down';
+        document.getElementById('health-text').className = 'err';
+        prevHealthy = false;
+        return;
+      }
+
+      const threshold = config.high_error_rate?.threshold_percent ?? 10;
+      const isHighError = data.error_rate_percent >= threshold;
+
+      // Service Down / Recovered
+      if (prevHealthy !== null && prevHealthy && !data.healthy) {
+        notify('Service Down', 'Health check failed — database unreachable.');
+        addEntry('ERROR', 'Service down — health check failed');
+      }
+      if (prevHealthy === false && data.healthy) {
+        addEntry('INFO', 'Service recovered');
+      }
+
+      // High Error Rate / Resolved
+      if (isHighError && !prevHighError) {
+        notify('High Error Rate', `Error rate is ${data.error_rate_percent.toFixed(1)}% (threshold: ${threshold}%)`);
+        addEntry('WARNING', `High error rate: ${data.error_rate_percent.toFixed(1)}% (threshold: ${threshold}%)`);
+      }
+      if (!isHighError && prevHighError) {
+        addEntry('INFO', 'Error rate back to normal');
+      }
+
+      prevHealthy = data.healthy;
+      prevHighError = isHighError;
+
+      // Update health UI
+      const healthDot = document.getElementById('health-dot');
+      const healthText = document.getElementById('health-text');
+      healthDot.className = 'dot ' + (data.healthy ? 'green' : 'red');
+      healthText.textContent = data.healthy ? 'Healthy' : 'Down';
+      healthText.className = data.healthy ? 'ok' : 'err';
+
+      // Update error rate UI
+      const errorDot = document.getElementById('error-dot');
+      const errorText = document.getElementById('error-text');
+      errorDot.className = 'dot ' + (isHighError ? 'red' : 'green');
+      errorText.textContent = data.error_rate_percent.toFixed(1) + '%';
+      errorText.className = isHighError ? 'err' : 'ok';
+    }
+
+    async function init() {
+      updateNotifyUI();
+      try {
+        const res = await fetch('/alerts/config');
+        config = await res.json();
+      } catch (_) {}
+      await checkStatus();
+      const interval = (config.service_down?.check_interval_seconds ?? 30) * 1000;
+      setInterval(checkStatus, interval);
+    }
+
+    init();
+  </script>
+</body>
+</html>

@@ -8,6 +8,7 @@ dependencies = [
     "peewee>=3.17",
     "psycopg2-binary>=2.9",
     "psutil>=6.0",
+    "pyyaml>=6.0",
     "python-dotenv>=1.0",
 ]
 

@@ -3,6 +3,7 @@ import time
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 
+from app.alerts import record_request
 from app.database import db, init_db
 from app.logging import init_logging
 from app.routes import register_routes
@@ -28,6 +29,7 @@ def create_app():
     def _log_request(response):
         duration_ms = round((time.monotonic() - request._start_time) * 1000)
         app.logger.info("%s %s %s (%dms)", request.method, request.path, response.status_code, duration_ms)
+        record_request(response.status_code)
         return response
 
     @app.route("/health")
