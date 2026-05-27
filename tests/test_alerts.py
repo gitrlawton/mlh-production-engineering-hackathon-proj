@@ -1,3 +1,4 @@
+import os
 import pytest
 from unittest.mock import patch
 from app import create_app
@@ -75,3 +76,37 @@ def test_error_rate_zero_when_no_errors(client):
         mock_db.execute_sql.return_value = None
         data = client.get("/alerts/status").get_json()
     assert data["error_rate_percent"] == 0.0
+
+
+def test_notify_skipped_when_no_webhook_set(client):
+    with patch.dict("os.environ", {}, clear=False):
+        os.environ.pop("DISCORD_WEBHOOK_URL", None)
+        data = client.post("/alerts/notify", json={
+            "level": "ERROR",
+            "title": "Service Down",
+            "message": "Health check failed.",
+        }).get_json()
+    assert data["status"] == "skipped"
+
+
+def test_notify_posts_to_discord(client):
+    with patch("app.routes.alerts.urllib.request.urlopen") as mock_urlopen:
+        with patch.dict("os.environ", {"DISCORD_WEBHOOK_URL": "https://discord.com/api/webhooks/test"}):
+            data = client.post("/alerts/notify", json={
+                "level": "ERROR",
+                "title": "Service Down",
+                "message": "Health check failed.",
+            }).get_json()
+    assert data["status"] == "sent"
+    assert mock_urlopen.called
+
+
+def test_notify_returns_error_on_discord_failure(client):
+    with patch("app.routes.alerts.urllib.request.urlopen", side_effect=Exception("timeout")):
+        with patch.dict("os.environ", {"DISCORD_WEBHOOK_URL": "https://discord.com/api/webhooks/test"}):
+            response = client.post("/alerts/notify", json={
+                "level": "ERROR",
+                "title": "Service Down",
+                "message": "Health check failed.",
+            })
+    assert response.status_code == 500

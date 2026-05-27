@@ -187,17 +187,16 @@
       updateNotifyUI();
     }
 
-    function notify(title, body) {
+    function fireAlert(level, title, message) {
+      // Browser notification
       if (Notification.permission === 'granted') {
-        new Notification(title, { body });
+        new Notification(title, { body: message });
       }
-    }
 
-    function addEntry(level, message) {
+      // Log entry on dashboard
       const log = document.getElementById('alert-log');
       const empty = document.getElementById('empty-msg');
       if (empty) empty.remove();
-
       const time = new Date().toLocaleTimeString();
       const el = document.createElement('div');
       el.className = 'alert-entry';
@@ -206,6 +205,13 @@
         `<span class="alert-level level-${level}">${level}</span>` +
         `<span>${message}</span>`;
       log.insertBefore(el, log.firstChild);
+
+      // Discord notification
+      fetch('/alerts/notify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ level, title, message }),
+      });
     }
 
     async function checkStatus() {
@@ -215,8 +221,7 @@
         data = await res.json();
       } catch (_) {
         if (prevHealthy !== false) {
-          notify('Service Down', 'Could not reach the server.');
-          addEntry('ERROR', 'Service unreachable — fetch failed');
+          fireAlert('ERROR', 'Service Down', 'Could not reach the server.');
         }
         document.getElementById('health-dot').className = 'dot red';
         document.getElementById('health-text').textContent = 'Down';
@@ -230,20 +235,18 @@
 
       // Service Down / Recovered
       if (prevHealthy !== null && prevHealthy && !data.healthy) {
-        notify('Service Down', 'Health check failed — database unreachable.');
-        addEntry('ERROR', 'Service down — health check failed');
+        fireAlert('ERROR', 'Service Down', 'Health check failed — database unreachable.');
       }
       if (prevHealthy === false && data.healthy) {
-        addEntry('INFO', 'Service recovered');
+        fireAlert('INFO', 'Service Recovered', 'Service is back online.');
       }
 
       // High Error Rate / Resolved
       if (isHighError && !prevHighError) {
-        notify('High Error Rate', `Error rate is ${data.error_rate_percent.toFixed(1)}% (threshold: ${threshold}%)`);
-        addEntry('WARNING', `High error rate: ${data.error_rate_percent.toFixed(1)}% (threshold: ${threshold}%)`);
+        fireAlert('WARNING', 'High Error Rate', `Error rate is ${data.error_rate_percent.toFixed(1)}% (threshold: ${threshold}%)`);
       }
       if (!isHighError && prevHighError) {
-        addEntry('INFO', 'Error rate back to normal');
+        fireAlert('INFO', 'Error Rate Normal', 'Error rate has returned to normal.');
       }
 
       prevHealthy = data.healthy;

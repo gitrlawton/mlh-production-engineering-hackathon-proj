@@ -1,7 +1,10 @@
+import json
+import os
+import urllib.request
 from pathlib import Path
 
 import yaml
-from flask import Blueprint, jsonify, render_template
+from flask import Blueprint, jsonify, render_template, request
 
 from app.alerts import get_error_rate
 from app.database import db
@@ -24,6 +27,39 @@ def alerts_dashboard():
 @alerts_bp.route("/alerts/config")
 def alerts_config():
     return jsonify(load_config()), 200
+
+
+@alerts_bp.route("/alerts/notify", methods=["POST"])
+def alerts_notify():
+    data = request.get_json(silent=True) or {}
+    title = data.get("title", "Alert")
+    message = data.get("message", "")
+    level = data.get("level", "INFO")
+
+    webhook_url = os.environ.get("DISCORD_WEBHOOK_URL")
+    if not webhook_url:
+        return jsonify({"status": "skipped", "reason": "DISCORD_WEBHOOK_URL not set"}), 200
+
+    colors = {"ERROR": 0xFF0000, "WARNING": 0xFF8C10, "INFO": 0x3498DB}
+    payload = json.dumps({
+        "embeds": [{
+            "title": title,
+            "description": message,
+            "color": colors.get(level, 0x3498DB),
+        }]
+    }).encode()
+
+    try:
+        req = urllib.request.Request(
+            webhook_url,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=5)
+        return jsonify({"status": "sent"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "reason": str(e)}), 500
 
 
 @alerts_bp.route("/alerts/status")
