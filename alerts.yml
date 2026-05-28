@@ -5,3 +5,7 @@ high_error_rate:
   check_interval_seconds: 30
   threshold_percent: 10
   window_requests: 100
+
+high_cpu:
+  threshold_percent: 90
+  sustained_seconds: 120

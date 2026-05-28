@@ -44,6 +44,21 @@ def test_alerts_status_shape(client):
         data = client.get("/alerts/status").get_json()
     assert "healthy" in data
     assert "error_rate_percent" in data
+    assert "cpu_percent" in data
+
+
+def test_alerts_status_cpu_in_range(client):
+    with patch("app.routes.alerts.db") as mock_db:
+        mock_db.execute_sql.return_value = None
+        data = client.get("/alerts/status").get_json()
+    assert 0.0 <= data["cpu_percent"] <= 100.0
+
+
+def test_alerts_config_has_high_cpu(client):
+    data = client.get("/alerts/config").get_json()
+    assert "high_cpu" in data
+    assert "threshold_percent" in data["high_cpu"]
+    assert "sustained_seconds" in data["high_cpu"]
 
 
 def test_alerts_status_healthy_when_db_ok(client):

@@ -51,7 +51,7 @@
 
     .status-grid {
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: 1fr 1fr 1fr;
       gap: 1rem;
       margin-bottom: 2rem;
     }
@@ -146,6 +146,14 @@
           <span id="error-text" class="muted">—</span>
         </div>
       </div>
+      <div class="status-card">
+        <div class="status-label">CPU Usage</div>
+        <div class="status-value">
+          <span class="dot" id="cpu-dot"></span>
+          <span id="cpu-text" class="muted">—</span>
+        </div>
+        <div id="cpu-sustained" style="font-size:0.75rem;color:#9ca3af;margin-top:0.4rem;"></div>
+      </div>
     </div>
 
     <h2>Alert History</h2>
@@ -157,10 +165,13 @@
   <script>
     let config = {
       service_down: { check_interval_seconds: 30 },
-      high_error_rate: { check_interval_seconds: 30, threshold_percent: 10 }
+      high_error_rate: { check_interval_seconds: 30, threshold_percent: 10 },
+      high_cpu: { threshold_percent: 90, sustained_seconds: 120 }
     };
     let prevHealthy = null;
     let prevHighError = false;
+    let consecutiveHighCpu = 0;
+    let cpuAlertActive = false;
 
     function updateNotifyUI() {
       const btn = document.getElementById('notify-btn');
@@ -252,6 +263,27 @@
       prevHealthy = data.healthy;
       prevHighError = isHighError;
 
+      // CPU alert — requires sustained high usage
+      const cpuThreshold = config.high_cpu?.threshold_percent ?? 90;
+      const sustainedSeconds = config.high_cpu?.sustained_seconds ?? 120;
+      const interval = config.service_down?.check_interval_seconds ?? 30;
+      const requiredPolls = Math.ceil(sustainedSeconds / interval);
+
+      if (data.cpu_percent >= cpuThreshold) {
+        consecutiveHighCpu++;
+      } else {
+        if (cpuAlertActive) {
+          fireAlert('INFO', 'CPU Normal', 'CPU usage has returned to normal.');
+        }
+        consecutiveHighCpu = 0;
+        cpuAlertActive = false;
+      }
+
+      if (consecutiveHighCpu >= requiredPolls && !cpuAlertActive) {
+        fireAlert('WARNING', 'High CPU Usage', `CPU has been above ${cpuThreshold}% for ${sustainedSeconds}s (currently ${data.cpu_percent.toFixed(1)}%)`);
+        cpuAlertActive = true;
+      }
+
       // Update health UI
       const healthDot = document.getElementById('health-dot');
       const healthText = document.getElementById('health-text');
@@ -265,6 +297,18 @@
       errorDot.className = 'dot ' + (isHighError ? 'red' : 'green');
       errorText.textContent = data.error_rate_percent.toFixed(1) + '%';
       errorText.className = isHighError ? 'err' : 'ok';
+
+      // Update CPU UI
+      const cpuDot = document.getElementById('cpu-dot');
+      const cpuText = document.getElementById('cpu-text');
+      const cpuSustained = document.getElementById('cpu-sustained');
+      const cpuHigh = data.cpu_percent >= cpuThreshold;
+      cpuDot.className = 'dot ' + (cpuHigh ? 'red' : 'green');
+      cpuText.textContent = data.cpu_percent.toFixed(1) + '%';
+      cpuText.className = cpuHigh ? 'err' : 'ok';
+      cpuSustained.textContent = cpuHigh && consecutiveHighCpu > 0
+        ? `High for ${consecutiveHighCpu}/${requiredPolls} polls`
+        : '';
     }
 
     async function init() {

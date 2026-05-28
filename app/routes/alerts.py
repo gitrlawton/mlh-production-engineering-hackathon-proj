@@ -6,6 +6,8 @@ from pathlib import Path
 import yaml
 from flask import Blueprint, jsonify, render_template, request
 
+import psutil
+
 from app.alerts import get_error_rate
 from app.database import db
 
@@ -76,4 +78,5 @@ def alerts_status():
     return jsonify({
         "healthy": healthy,
         "error_rate_percent": get_error_rate(),
+        "cpu_percent": psutil.cpu_percent(interval=None),
     }), 200
