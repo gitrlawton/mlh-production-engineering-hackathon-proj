@@ -7,6 +7,8 @@ COPY . .
 RUN pip install uv
 RUN uv sync
 
+ENV PATH="/app/.venv/bin:$PATH"
+
 EXPOSE 5000
 
-CMD ["uv", "run", "run.py"]
+CMD ["ddtrace-run", "python", "run.py"]

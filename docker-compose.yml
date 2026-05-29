@@ -10,9 +10,20 @@ services:
       - DATABASE_PORT=5432
       - DATABASE_USER=postgres
       - DATABASE_PASSWORD=postgres
+      - FLASK_DEBUG=false
+      - DD_TRACE_AGENT_URL=unix:///var/run/datadog/apm.socket
+      - DD_DOGSTATSD_URL=unix:///var/run/datadog/dsd.socket
+      - DD_SERVICE=mlh-hackathon
+      - DD_ENV=production
+      - DD_VERSION=1.0
+      - DD_TRACE_DEBUG=true
+    volumes:
+      - /var/run/datadog:/var/run/datadog
     depends_on:
       db:
         condition: service_healthy
+      datadog:
+        condition: service_started
 
   db:
     image: postgres:16
@@ -28,6 +39,24 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  datadog:
+    image: registry.datadoghq.com/agent:7
+    restart: always
+    environment:
+      - DD_API_KEY=${DD_API_KEY}
+      - DD_SITE=${DD_SITE}
+      - DD_APM_ENABLED=true
+      - DD_APM_NON_LOCAL_TRAFFIC=true
+      - DD_DOGSTATSD_NON_LOCAL_TRAFFIC=true
+      - DD_APM_RECEIVER_SOCKET=/var/run/datadog/apm.socket
+      - DD_DOGSTATSD_SOCKET=/var/run/datadog/dsd.socket
+    volumes:
+      - /var/run/datadog:/var/run/datadog
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /proc/:/host/proc/:ro
+      - /sys/fs/cgroup/:/host/sys/fs/cgroup:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
 
 volumes:
   postgres_data:
