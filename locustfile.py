@@ -80,5 +80,5 @@ def print_summary(environment, **kwargs):
     )
     print("=" * 70)
     failure_rate = (total.num_failures / total.num_requests * 100) if total.num_requests else 0
-    print(f"  Users: 50 concurrent   Failure rate: {failure_rate:.1f}%")
+    print(f"  Users: {environment.runner.target_user_count} concurrent   Failure rate: {failure_rate:.1f}%")
     print("=" * 70 + "\n")
