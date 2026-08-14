@@ -1,6 +1,7 @@
 import secrets
 from urllib.parse import urlparse
 from flask import Blueprint, jsonify, redirect, render_template, request
+from app.cache import cache
 from app.models.url import Url
 from peewee import DoesNotExist, IntegrityError
 
@@ -21,7 +22,12 @@ def create_url(original_url):
     for _ in range(MAX_RETRIES):
         short_code = secrets.token_urlsafe(6)
         try:
-            return Url.create(original_url=original_url, short_code=short_code)
+            url = Url.create(original_url=original_url, short_code=short_code)
+            try:
+                cache.setex(f"url:{short_code}", 3600, original_url)
+            except Exception:
+                pass
+            return url
         except IntegrityError:
             continue
     return None
@@ -64,7 +70,19 @@ def shorten():
 @urls_bp.route("/<short_code>", methods=["GET"])
 def redirect_to_url(short_code):
     try:
+        cached_url = cache.get(f"url:{short_code}")
+        if cached_url:
+            return redirect(cached_url)
+    except Exception:
+        pass
+
+    try:
         url = Url.get(Url.short_code == short_code)
+        try:
+            cache.setex(f"url:{short_code}", 3600, url.original_url)
+        except Exception:
+            pass
         return redirect(url.original_url)
     except DoesNotExist:
         return jsonify({"error": "short code not found"}), 404
+
