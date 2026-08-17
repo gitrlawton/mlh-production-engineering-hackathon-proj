@@ -1,342 +1,316 @@
 # URL Shortener — Project README
 
-A URL shortening service built with Flask, Peewee ORM, and PostgreSQL.
-Paste in a long URL, get a short link back. Click the short link, get redirected.
+A high-concurrency, observable, and fault-tolerant URL shortening service built with Flask, Peewee ORM, PostgreSQL, Redis in-memory caching, Nginx load balancing, and Datadog APM monitoring.
+
+Paste in a long URL, get a short link back. Click the short link, get redirected in sub-milliseconds.
 
 ---
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                        Client                           │
-│              (Browser or HTTP client)                   │
-└────────────────────────┬────────────────────────────────┘
-                         │  HTTP requests
-                         ▼
-┌─────────────────────────────────────────────────────────┐
-│                    Flask App  (:5000)                   │
-│                                                         │
-│  ┌──────────────┐   ┌───────────────────────────────┐  │
-│  │   Web UI     │   │         JSON API              │  │
-│  │  GET  /      │   │  POST /shorten                │  │
-│  │  POST /      │   │  GET  /health                 │  │
-│  └──────────────┘   └───────────────────────────────┘  │
-│                                                         │
-│  ┌─────────────────────────────────────────────────┐   │
-│  │              Redirect Handler                    │   │
-│  │              GET /<short_code>                   │   │
-│  └─────────────────────────────────────────────────┘   │
-│                                                         │
-│  ┌─────────────────────────────────────────────────┐   │
-│  │          Peewee ORM  (database.py)               │   │
-│  │    Per-request connection open/close lifecycle   │   │
-│  └────────────────────┬────────────────────────────┘   │
-└───────────────────────┼─────────────────────────────────┘
-                        │  SQL queries (psycopg2)
-                        ▼
-┌─────────────────────────────────────────────────────────┐
-│                  PostgreSQL  (:5432)                    │
-│                                                         │
-│   table: url                                            │
-│   ┌────┬───────────────────────┬──────────────┐        │
-│   │ id │     original_url      │  short_code  │        │
-│   ├────┼───────────────────────┼──────────────┤        │
-│   │  1 │ https://example.com/… │   aB3xYz     │        │
-│   └────┴───────────────────────┴──────────────┘        │
-└─────────────────────────────────────────────────────────┘
+```text
+┌───────────────────────────────────────────────────────────────────────────────────────────┐
+│                                          Client                                           │
+│                       (Browser, API consumer, or Locust Load Test)                        │
+└─────────────────────────────────────────────┬─────────────────────────────────────────────┘
+                                              │ HTTP Requests (Port 5000)
+                                              ▼
+┌───────────────────────────────────────────────────────────────────────────────────────────┐
+│                                 Nginx Load Balancer (:80)                                 │
+│                      Round-robin traffic distribution across replicas                     │
+└───────────────┬─────────────────────────────┬─────────────────────────────┬───────────────┘
+                │                             │                             │
+                ▼                             ▼                             ▼
+   ┌───────────────────────────┐ ┌───────────────────────────┐ ┌───────────────────────────┐
+   │    Flask App Replica 1    │ │    Flask App Replica 2    │ │    Flask App Replica N    │
+   │  ┌─────────────────────┐  │ │  ┌─────────────────────┐  │ │  ┌─────────────────────┐  │
+   │  │ Web UI & Alerts UI  │  │ │  │ Web UI & Alerts UI  │  │ │  │ Web UI & Alerts UI  │  │
+   │  │ GET /   POST /      │  │ │  │ GET /   POST /      │  │ │  │ GET /   POST /      │  │
+   │  │ GET /alerts         │  │ │  │ GET /alerts         │  │ │  │ GET /alerts         │  │
+   │  ├─────────────────────┤  │ │  ├─────────────────────┤  │ │  ├─────────────────────┤  │
+   │  │ JSON API & Metrics  │  │ │  │ JSON API & Metrics  │  │ │  │ JSON API & Metrics  │  │
+   │  │ POST /shorten       │  │ │  │ POST /shorten       │  │ │  │ POST /shorten       │  │
+   │  │ GET /health /metrics│  │ │  │ GET /health /metrics│  │ │  │ GET /health /metrics│  │
+   │  │ GET /logs           │  │ │  │ GET /logs           │  │ │  │ GET /logs           │  │
+   │  ├─────────────────────┤  │ │  ├─────────────────────┤  │ │  ├─────────────────────┤  │
+   │  │ Redirect Handler    │  │ │  │ Redirect Handler    │  │ │  │ Redirect Handler    │  │
+   │  │ GET /<short_code>   │  │ │  │ GET /<short_code>   │  │ │  │ GET /<short_code>   │  │
+   │  └──────────┬──────────┘  │ │  └──────────┬──────────┘  │ │  └──────────┬──────────┘  │
+   │             │             │ │             │             │ │             │             │
+   │  ┌──────────▼──────────┐  │ │  ┌──────────▼──────────┐  │ │  ┌──────────▼──────────┐  │
+   │  │ Datadog Tracer (APM)│  │ │  │ Datadog Tracer (APM)│  │ │  │ Datadog Tracer (APM)│  │
+   │  │ (ddtrace-run)       │  │ │  │ (ddtrace-run)       │  │ │  │ (ddtrace-run)       │  │
+   │  └─────────────────────┘  │ │  └─────────────────────┘  │ │  └─────────────────────┘  │
+   └─────────────┬─────────────┘ └─────────────┬─────────────┘ └─────────────┬─────────────┘
+                 │                             │                             │
+        ┌────────┴─────────────────────────────┴─────────────────────────────┴────────┐
+        │                                                                             │
+        │ In-Memory Read/Write                                   Database Read/Write  │
+        ▼                                                                             ▼
+┌───────────────────────────────┐                             ┌───────────────────────────────┐
+│         Redis (:6379)         │                             │      PostgreSQL (:5432)       │
+│                               │                             │                               │
+│  Key-Value Cache (1 hr TTL)   │                             │  Persistent Storage (url)     │
+│  `url:<short_code>` ➔ URL     │                             │  `id, original_url, code`     │
+└───────────────────────────────┘                             └───────────────────────────────┘
+                                                                              ▲
+                                                                              │
+                                                              ┌───────────────┴───────────────┐
+                                                              │     Datadog Agent Container   │
+                                                              │  APM Traces, Metrics & StatsD │
+                                                              └───────────────────────────────┘
 ```
 
-**Request flow:**
+**Request Flow:**
 
-1. Client sends a URL to `POST /shorten`
-2. Flask validates the URL (must be `http://` or `https://`, ≤ 2048 chars)
-3. A random 8-character short code is generated using `secrets.token_urlsafe`
-4. The mapping is stored in PostgreSQL via Peewee ORM
-5. The short URL is returned to the client
-6. When a client hits `GET /<short_code>`, Flask looks up the code and issues a `302` redirect
+1. **Shorten URL (`POST /shorten` or `POST /`)**:
+   - Client sends a URL.
+   - Flask validates the URL (must start with `http://` or `https://`, length ≤ 2048 chars).
+   - Generates a unique short code with collision retries.
+   - Stores the mapping in **PostgreSQL** via Peewee ORM.
+   - Immediately populates **Redis** (`url:<short_code>` ➔ `original_url`) via write-through caching.
+   - Returns the short URL.
+
+2. **Follow Short Link (`GET /<short_code>`)**:
+   - Nginx balances the request to an available Flask replica.
+   - Flask checks **Redis** first.
+   - **Cache Hit (<1ms):** Returns `302 Found` redirect immediately from RAM without hitting PostgreSQL.
+   - **Cache Miss:** Queries PostgreSQL, populates Redis, and issues `302 Found`.
+   - If Redis is unavailable, the service automatically falls back to PostgreSQL queries gracefully.
 
 ---
 
 ## Prerequisites
 
-| Requirement | Version | Notes                         |
-| ----------- | ------- | ----------------------------- |
-| Python      | 3.13    | Managed automatically by `uv` |
-| uv          | latest  | Fast Python package manager   |
-| PostgreSQL  | 18+     | Local install or Docker       |
-
-**Install uv:**
-
-```bash
-# macOS / Linux
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Windows (PowerShell)
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-```
+| Requirement | Recommended Version | Notes |
+| :--- | :--- | :--- |
+| **Python** | `3.13` | Managed automatically by `uv` |
+| **uv** | Latest | Fast Python package and environment manager |
+| **Docker & Docker Compose** | Docker Desktop | Runs the multi-container fleet (Nginx, Redis, Postgres, Datadog) |
+| **PostgreSQL** | `16+` | Included in Docker Compose or run locally |
+| **Redis** | `7+` | Included in Docker Compose or run locally |
 
 ---
 
-## Setup (Local — PostgreSQL on your machine)
+## Setup & Running
+
+### Option 1: Docker (Recommended — Full Production Fleet)
+
+Starts the complete fleet: Nginx load balancer, PostgreSQL database, Redis in-memory cache, Datadog Agent, and 4 scaled Flask application replicas.
 
 ```bash
-# 1. Clone the repository
-git clone <repo-url>
-cd mlh-production-engineering-hackathon-proj
-
-# 2. Create the database
-createdb -U postgres hackathon_db
-
-# 3. Copy and configure environment variables
+# 1. Configure environment variables
 cp .env.example .env
-# Open .env and set DATABASE_PASSWORD if your Postgres user has one
 
-# 4. Install all dependencies
-uv sync
+# 2. Build and launch all services with 4 app replicas
+docker compose up -d --build --scale app=4
 
-# 5. Start the server
-uv run run.py
-```
-
-The app is now running at **http://localhost:5000**.
-
-**Verify it's working:**
-
-```bash
+# 3. Verify health
 curl http://localhost:5000/health
 # Expected: {"status": "ok"}
-```
 
----
+# 4. View running fleet
+docker ps
 
-## Setup (Docker — no local PostgreSQL needed)
-
-```bash
-# Start both the app and the database
-docker compose up -d
-
-# Check the app is healthy
-curl http://localhost:5000/health
-
-# Stop everything
+# 5. Stop all containers
 docker compose down
 ```
 
-Docker handles the database automatically — no manual `createdb` needed.
+### Option 2: Local Development (Native)
+
+For testing and development outside Docker:
+
+```bash
+# 1. Install dependencies into virtual environment
+uv sync
+
+# 2. Configure .env
+cp .env.example .env
+# Ensure local PostgreSQL and Redis are running on localhost
+
+# 3. Start the application
+uv run python run.py
+```
+
+The application is accessible at **http://localhost:5000**.
 
 ---
 
 ## Environment Variables
 
-All variables live in `.env` (copy from `.env.example`):
+All variables live in `.env` (copied from `.env.example`):
 
-| Variable            | Default         | Description              |
-| ------------------- | --------------- | ------------------------ |
-| `DATABASE_NAME`     | `hackathon_db`  | PostgreSQL database name |
-| `DATABASE_HOST`     | `localhost`     | PostgreSQL host          |
-| `DATABASE_PORT`     | `5432`          | PostgreSQL port          |
-| `DATABASE_USER`     | `postgres`      | PostgreSQL user          |
-| `DATABASE_PASSWORD` | <your-password> | PostgreSQL password      |
-| `FLASK_DEBUG`       | `false`         | Enable Flask debug mode  |
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `DATABASE_NAME` | `hackathon_db` | PostgreSQL database name |
+| `DATABASE_HOST` | `localhost` (local) / `db` (Docker) | PostgreSQL host address |
+| `DATABASE_PORT` | `5432` | PostgreSQL port |
+| `DATABASE_USER` | `postgres` | PostgreSQL username |
+| `DATABASE_PASSWORD` | `postgres` | PostgreSQL password |
+| `REDIS_HOST` | `localhost` (local) / `redis` (Docker) | Redis cache host address |
+| `REDIS_PORT` | `6379` | Redis cache port |
+| `FLASK_DEBUG` | `false` | Enable Flask debug mode |
+| `DISCORD_WEBHOOK_URL`| *(Optional)* | Discord webhook for incident error rate alerts |
+| `DD_API_KEY` | *(Optional)* | Datadog API key for APM and metrics collection |
+| `DD_SITE` | `us3.datadoghq.com` | Datadog site intake URL |
 
 ---
 
 ## Project Structure
 
-```
+```text
 mlh-production-engineering-hackathon-proj/
 ├── app/
-│   ├── __init__.py          # App factory (create_app), health endpoint, error handlers
-│   ├── database.py          # DatabaseProxy, BaseModel, per-request connection lifecycle
+│   ├── __init__.py          # App factory (create_app), request timing, global error handlers
+│   ├── alerts.py            # Discord webhook dispatcher, sliding-window error rate calculator
+│   ├── cache.py             # Redis client initialization and configuration
+│   ├── database.py          # DatabaseProxy, BaseModel, Peewee connection lifecycle
+│   ├── logging.py           # Structured request logging configuration
 │   ├── models/
-│   │   ├── __init__.py      # Model imports
-│   │   └── url.py           # Url model (original_url, short_code)
+│   │   ├── __init__.py      # Model exports
+│   │   └── url.py           # Url Peewee model (original_url, short_code, created_at)
 │   ├── routes/
-│   │   ├── __init__.py      # register_routes()
-│   │   └── urls.py          # All URL shortener routes + validation logic
+│   │   ├── __init__.py      # Blueprint registration
+│   │   ├── alerts.py        # /alerts UI and /alerts/test webhook trigger endpoint
+│   │   ├── debug.py         # Debugging routes
+│   │   ├── logs.py          # /logs endpoint for recent access history
+│   │   ├── metrics.py       # /metrics endpoint (request counts, latency, memory/CPU)
+│   │   └── urls.py          # URL shortener, redirect handler, Redis read/write cache
 │   └── templates/
-│       └── index.html       # Web UI (HTML form + result display)
+│       ├── alerts.html      # Incident response & alerts dashboard
+│       └── index.html       # Web UI for creating and managing short links
 ├── tests/
-│   ├── test_urls.py         # Route-level functional tests
-│   ├── test_integration.py  # Database state integration tests
-│   └── test_bonus.py        # Reliability edge-case tests
-├── .github/
-│   └── workflows/
-│       └── ci.yml           # GitHub Actions CI (runs tests on every push)
-├── docker-compose.yml       # PostgreSQL + Flask containers
-├── Dockerfile               # Flask app image
-├── pyproject.toml           # Dependencies and project metadata
-├── .env.example             # Environment variable template
-├── run.py                   # Entry point: uv run run.py
-└── README.md                # Template-level setup guide
+│   ├── test_alerts.py       # Alert threshold, sliding window, and webhook tests
+│   ├── test_bonus.py        # Edge cases (malformed input, collisions, scheme validation)
+│   ├── test_cache.py        # Redis cache hits, misses, and DB fallback unit tests
+│   ├── test_integration.py  # Database state & Peewee integration tests
+│   ├── test_logs.py         # Request log formatting and duration tracking tests
+│   ├── test_metrics.py      # Metrics collection and calculation tests
+│   └── test_urls.py         # Functional route tests for core URL shortener flows
+├── scripts/
+│   └── trigger_high_error_rate.py # Incident simulation script to trigger Discord alerts
+├── Hackathon_Quests/        # Quest documentation, verification screenshots, bottleneck report
+├── alerts.yml               # Threshold rules and cooldown configuration for alerts
+├── docker-compose.yml       # Production fleet: Nginx, App replicas, Redis, Postgres, Datadog
+├── Dockerfile               # Production container definition (Python 3.13-slim + uv)
+├── locustfile.py            # Locust load test suite for 50, 200, and 500 concurrent users
+├── nginx.conf               # Nginx reverse proxy and upstream round-robin load balancer config
+├── pyproject.toml           # Project dependencies (Flask, Peewee, Redis, Locust, ddtrace, pytest)
+├── .env.example             # Environment template
+└── run.py                   # Development entrypoint
 ```
 
 ---
 
 ## API Reference
 
-### `GET /health`
+### Core URL Shortener Routes
 
-Health check. Verifies the app is running and can reach the database.
+#### `POST /shorten`
+Shortens a URL programmatically via JSON API.
 
-**Response — healthy:**
+* **Request:**
+  ```json
+  POST /shorten
+  Content-Type: application/json
 
-```
-HTTP 200 OK
-{"status": "ok"}
-```
-
-**Response — database unreachable:**
-
-```
-HTTP 503 Service Unavailable
-{"status": "unavailable", "reason": "database unreachable"}
-```
-
----
-
-### `GET /`
-
-Serves the web UI — an HTML form where users can paste a URL and shorten it in the browser.
-
-**Response:**
-
-```
-HTTP 200 OK
-Content-Type: text/html
-```
+  {
+    "url": "https://www.example.com/very/long/url/path"
+  }
+  ```
+* **Response (201 Created):**
+  ```json
+  {
+    "short_code": "xGIUqq",
+    "short_url": "http://localhost:5000/xGIUqq"
+  }
+  ```
+* **Response (400 Bad Request):**
+  ```json
+  {
+    "error": "a valid url is required (must start with http:// or https://)"
+  }
+  ```
 
 ---
 
-### `POST /`
+#### `GET /<short_code>`
+Resolves the short code and redirects the client to the original destination. Served directly from Redis RAM in <1ms on cache hits.
 
-Form-based URL shortening (used by the web UI). Accepts `application/x-www-form-urlencoded`.
-
-**Request body (form field):**
-
-| Field | Required | Description        |
-| ----- | -------- | ------------------ |
-| `url` | Yes      | The URL to shorten |
-
-**Response — success:**
-
-```
-HTTP 200 OK
-Content-Type: text/html
-(renders page with the short URL displayed as a clickable link)
-```
-
-**Response — invalid URL:**
-
-```
-HTTP 200 OK
-Content-Type: text/html
-(renders page with error: "A valid URL is required (must start with http:// or https://)")
-```
+* **Response (302 Found):**
+  ```text
+  HTTP/1.1 302 Found
+  Location: https://www.example.com/very/long/url/path
+  ```
+* **Response (404 Not Found):**
+  ```json
+  {
+    "error": "short code not found"
+  }
+  ```
 
 ---
 
-### `POST /shorten`
-
-JSON API for programmatic URL shortening.
-
-**Request:**
-
-```
-POST /shorten
-Content-Type: application/json
-
-{"url": "https://www.example.com/some/very/long/path"}
-```
-
-**Response — success:**
-
-```
-HTTP 201 Created
-{
-  "short_code": "aB3xYz12",
-  "short_url": "http://localhost:5000/aB3xYz12"
-}
-```
-
-**Response — missing or invalid URL:**
-
-```
-HTTP 400 Bad Request
-{"error": "a valid url is required (must start with http:// or https://)"}
-```
-
-**Response — short code generation failed:**
-
-```
-HTTP 500 Internal Server Error
-{"error": "could not generate a unique short code"}
-```
+#### `GET /` & `POST /`
+Serves the browser Web UI and handles standard form submissions.
 
 ---
 
-### `GET /<short_code>`
+### Observability & Management Routes
 
-Redirects the client to the original URL stored for the given short code.
+#### `GET /health`
+Verifies that the application can reach the database.
+* **Response (200 OK):** `{"status": "ok"}`
+* **Response (503 Service Unavailable):** `{"status": "unavailable", "reason": "database unreachable"}`
 
-**Example:** `GET /aB3xYz12`
+#### `GET /metrics`
+Returns application metrics, request statistics, latency percentiles, and system resource utilization.
 
-**Response — found:**
+#### `GET /logs`
+Returns the recent structured access logs with response times and HTTP status codes.
 
-```
-HTTP 302 Found
-Location: https://www.example.com/some/very/long/path
-```
-
-**Response — not found:**
-
-```
-HTTP 404 Not Found
-{"error": "short code not found"}
-```
+#### `GET /alerts` & `POST /alerts/test`
+- `GET /alerts`: Renders the Alert Management Dashboard displaying error rate statistics and trigger history.
+- `POST /alerts/test`: Dispatches a sample incident alert to the configured `DISCORD_WEBHOOK_URL`.
 
 ---
 
-## URL Validation Rules
+## Reliability, Monitoring & Alerting
 
-The app accepts a URL only if **all** of the following are true:
+### 1. Alerting System (`app/alerts.py` & `alerts.yml`)
+- Tracks error rates in a sliding request window.
+- Automatically dispatches alert payloads with system diagnostics to Discord when error rates exceed threshold rules.
+- Includes a cooldown window to prevent webhook spamming during sustained incidents.
 
-- Scheme is `http` or `https` (rejects `ftp://`, `file://`, bare hostnames, etc.)
-- A network location (domain or IP) is present
-- Total length is 2048 characters or fewer
-- Leading/trailing whitespace is stripped before validation
+### 2. Datadog APM & Metrics
+- The Docker fleet includes the official Datadog Agent container (`agent:7`).
+- Flask services run wrapped in `ddtrace-run`, tracing database query durations, HTTP latency, and Redis cache operations automatically.
 
 ---
 
-## Running Tests
+## Testing & Benchmarks
+
+### 1. Automated Test Suite (Pytest)
+Run all 54 unit and integration tests across the 7 test modules:
 
 ```bash
-# Run all tests with coverage report
+# Run all tests
+uv run pytest tests/ -v
+
+# Run with test coverage report
 uv run pytest tests/ -v --cov=app --cov-report=term-missing
-
-# Run a specific test file
-uv run pytest tests/test_urls.py -v
-
-# Run tests and fail if coverage drops below 50%
-uv run pytest tests/ --cov=app --cov-fail-under=50
 ```
 
-Tests require a running PostgreSQL instance configured via `.env`.
-
----
-
-## Quick Reference
+### 2. High-Concurrency Load Testing (Locust)
+Stress test the load balanced fleet:
 
 ```bash
-# Shorten a URL (API)
-curl -X POST http://localhost:5000/shorten \
-  -H "Content-Type: application/json" \
-  -d '{"url": "https://www.example.com"}'
-
-# Follow the short link
-curl -L http://localhost:5000/<short_code>
-
-# Check service health
-curl http://localhost:5000/health
+# 500 Concurrent Users
+uv run locust -f locustfile.py --headless -u 500 -r 50 --run-time 1m --host http://localhost:5000
 ```
+
+**Benchmark Results:**
+- **Concurrency:** 500 concurrent users
+- **Throughput:** 242.1 requests / second
+- **Stability:** 0.0% failure rate (0 errors across 13,546+ requests)
+- **Latency (p95):** 210 ms
