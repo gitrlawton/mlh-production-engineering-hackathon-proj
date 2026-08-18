@@ -1,27 +1,92 @@
 # Deploy Guide
 
-How to get the URL Shortener running, and how to roll back if something goes wrong.
+How to get the URL Shortener service running, scale it under load, and safely roll back if something goes wrong.
 
 ---
 
 ## Deployment Options
 
-There are two supported ways to run this app:
+There are two supported ways to run this application:
 
 | Option | When to use |
-|--------|-------------|
-| [Local (no Docker)](#local-deployment) | Development, quick testing |
-| [Docker Compose](#docker-deployment) | Preferred for any shared or production-like environment |
+| :--- | :--- |
+| **[Docker Compose](#docker-deployment) (Recommended)** | Production, staging, and high-concurrency environments with load balancing and caching |
+| **[Local (no Docker)](#local-deployment)** | Development, debugging, and local unit testing |
 
 ---
 
-## Local Deployment
+## Docker Deployment (Recommended)
+
+Docker Compose manages the complete multi-service production fleet:
+- **Nginx**: Reverse proxy and round-robin load balancer listening on port `5000`.
+- **App Replicas**: Multiple independent Flask application containers running with Datadog APM tracing.
+- **Redis**: In-memory cache for sub-millisecond redirect lookups.
+- **PostgreSQL**: Persistent relational database for URL records.
+- **Datadog Agent**: Background collector for APM traces, latency metrics, and container statistics.
 
 ### Prerequisites
 
-- Python 3.13
-- [uv](https://github.com/astral-sh/uv) installed
-- PostgreSQL running locally
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) installed and running.
+
+### Steps
+
+```bash
+# 1. Clone the repository
+git clone <repo-url>
+cd mlh-production-engineering-hackathon-proj
+
+# 2. Configure environment variables
+cp .env.example .env
+# Edit .env to supply optional Datadog API keys or Discord webhook URLs if desired
+
+# 3. Build and start the complete fleet with 4 scaled app replicas
+docker compose up -d --build --scale app=4
+
+# 4. Verify service health
+curl http://localhost:5000/health
+# Expected: {"status": "ok"}
+```
+
+The `app` containers wait for both the `db` (PostgreSQL) and `redis` containers to pass their health checks before starting, ensuring dependencies are fully operational.
+
+### Useful Docker Commands
+
+```bash
+# View live logs across all services
+docker compose logs -f
+
+# View live logs from the scaled app containers only
+docker compose logs -f app
+
+# View live logs from Nginx load balancer
+docker compose logs -f nginx
+
+# Check status of all containers
+docker ps
+
+# Dynamically change the number of app instances (e.g. scale to 6 instances)
+docker compose up -d --scale app=6
+
+# Inspect cached keys in Redis
+docker compose exec redis redis-cli keys "url:*"
+
+# Stop all containers (preserves database volume)
+docker compose down
+
+# Stop all containers and wipe database/cache volume (destructive)
+docker compose down -v
+```
+
+---
+
+## Local Deployment (Development)
+
+### Prerequisites
+
+- **Python 3.13** (managed automatically via `uv`)
+- **[uv](https://github.com/astral-sh/uv)** installed
+- **PostgreSQL** running locally on port `5432`
+- **Redis** running locally on port `6379`
 
 ### Steps
 
@@ -30,159 +95,122 @@ There are two supported ways to run this app:
 git clone <repo-url>
 cd mlh-production-engineering-hackathon-proj
 
-# 2. Create the database
+# 2. Create the PostgreSQL database
 createdb -U postgres hackathon_db
 
 # 3. Configure environment
 cp .env.example .env
-# Edit .env — set DATABASE_PASSWORD to your Postgres password
+# Ensure DATABASE_HOST=localhost and REDIS_HOST=localhost in .env
 
 # 4. Install dependencies
 uv sync
 
-# 5. Start the server
-uv run run.py
+# 5. Start the development server
+uv run python run.py
 ```
 
-The app starts at **http://localhost:5000**.
+The application starts at **http://localhost:5000**.
 
-Verify it's up:
-
+Verify it is up:
 ```bash
 curl http://localhost:5000/health
 # Expected: {"status": "ok"}
-```
-
-`run.py` creates the `url` table automatically on startup if it doesn't already exist.
-
----
-
-## Docker Deployment
-
-Docker Compose starts both the app and a PostgreSQL container — no local Postgres install needed.
-
-### Steps
-
-```bash
-# 1. Clone the repo
-git clone <repo-url>
-cd mlh-production-engineering-hackathon-proj
-
-# 2. Start everything
-docker compose up -d
-
-# 3. Verify
-curl http://localhost:5000/health
-# Expected: {"status": "ok"}
-```
-
-The `app` container waits for the `db` container to pass its health check before starting, so the database is always ready when the app comes up.
-
-### Useful Docker commands
-
-```bash
-# View live logs
-docker compose logs -f app
-
-# Stop everything (preserves the database volume)
-docker compose down
-
-# Stop and wipe the database volume (destructive — all data is lost)
-docker compose down -v
-
-# Rebuild the app image after a code change
-docker compose up -d --build
 ```
 
 ---
 
 ## Deploying an Update
 
+### Docker (Production Fleet)
+
+```bash
+# 1. Pull the latest code
+git pull origin main
+
+# 2. Rebuild and launch the updated fleet with scaled replicas
+docker compose up -d --build --scale app=4
+```
+
+`--build` rebuilds the application image with any new code or dependencies. The database volume remains untouched and persistent.
+
 ### Local
 
 ```bash
 git pull origin main
-uv sync          # install any new dependencies
-uv run run.py
+uv sync
+uv run python run.py
 ```
-
-### Docker
-
-```bash
-git pull origin main
-docker compose up -d --build
-```
-
-`--build` rebuilds the `app` image from the updated code. The `db` container and its data volume are untouched.
 
 ---
 
 ## Rollback
 
-### Rolling back the code
+### 1. Rolling Back Code
 
-Every commit is a potential rollback target. Find the commit you want to return to:
+Find the target commit to revert to:
 
 ```bash
 git log --oneline
 ```
 
-**Option A — revert (safe, keeps history):**
-
+**Option A — Safe Revert (Preserves history):**
 ```bash
-git revert HEAD          # undo the last commit
-git push origin main     # push the revert commit
+git revert HEAD          # Undo the last commit
+git push origin main     # Push the revert commit
 ```
 
-**Option B — reset (rewrites history, use with caution):**
-
+**Option B — Hard Reset (Use with caution):**
 ```bash
 git reset --hard <commit-hash>
 git push --force origin main
 ```
 
-### Redeploying after a rollback
-
-**Local:**
+### 2. Redeploying After a Rollback
 
 ```bash
-uv sync
-uv run run.py
+# Rebuild containers from the rolled-back commit
+docker compose up -d --build --scale app=4
+
+# (Optional) If the rollback modified cache key structures, flush Redis:
+docker compose exec redis redis-cli flushall
 ```
 
-**Docker:**
+### 3. Database Considerations
 
-```bash
-docker compose up -d --build
-```
-
-### Database considerations
-
-This app's schema is minimal (one table: `url`). Schema changes are applied automatically by `run.py` at startup via `db.create_tables([Url], safe=True)`.
-
-- `safe=True` means the `CREATE TABLE` is skipped if the table already exists — it will never drop data on a normal restart.
-- If a rollback removes a column or table that existing rows depend on, manually inspect the database before restarting. Connect with `psql -U postgres hackathon_db` and verify.
+The application schema is managed via Peewee ORM in `run.py` at startup via `db.create_tables([Url], safe=True)`.
+- `safe=True` ensures `CREATE TABLE` is skipped if the table already exists.
+- If a rollback removes a database column or model that existing rows depend on, manually inspect the database before restarting using `psql -U postgres hackathon_db`.
 
 ---
 
 ## Verifying a Deployment
 
-Run through this checklist after any deploy or rollback:
+Run through this checklist after every deployment or rollback:
 
 ```bash
 # 1. Health endpoint responds
 curl http://localhost:5000/health
 # Expected: {"status": "ok"}
 
-# 2. Shorten a URL
+# 2. Metrics endpoint is collecting stats
+curl http://localhost:5000/metrics
+# Expected: JSON containing requests_total, latency_ms, and memory stats
+
+# 3. Shorten a URL via API (populates DB and Redis cache)
 curl -X POST http://localhost:5000/shorten \
   -H "Content-Type: application/json" \
   -d '{"url": "https://example.com"}'
-# Expected: HTTP 201, body contains short_code and short_url
+# Expected: HTTP 201 Created with short_code and short_url
 
-# 3. Follow the short link
+# 4. Follow the short link (verifies Redis fast-path redirect)
 curl -L http://localhost:5000/<short_code>
-# Expected: redirects to https://example.com
-```
+# Expected: 302 redirect to https://example.com
 
-All three passing means the app, database connection, and redirect flow are working end to end.
+# 5. Verify in-memory cache key creation
+docker compose exec redis redis-cli keys "url:*"
+# Expected: lists the generated url:<short_code> key
+
+# 6. (Optional) Run automated load verification
+uv run locust -f locustfile.py --headless -u 100 -r 20 --run-time 30s --host http://localhost:5000
+# Expected: 0.0% failure rate with response times < 100ms
+```
