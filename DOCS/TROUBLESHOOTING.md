@@ -1,201 +1,205 @@
 # Troubleshooting Guide
 
-Common problems and how to fix them.
+Common issues, failure diagnostics, and step-by-step solutions for the URL Shortener service and its multi-container fleet.
 
 ---
 
-## Database connection errors
+## 1. Nginx & Load Balancing Issues
 
-### Symptom
-App fails to start, or `/health` returns `{"status": "unavailable", "reason": "database unreachable"}`.
+### Symptom: `HTTP 502 Bad Gateway`
+When opening `http://localhost:5000`, Nginx returns a 502 Bad Gateway error page.
 
-Typical error in logs:
+### Causes & Fixes
+* **All backend `app` containers are down or still starting:**
+  Nginx cannot establish a connection to the upstream `app:5000` service.
+  ```bash
+  # Check container status across all replicas
+  docker compose ps
+
+  # Check logs for the app replicas
+  docker compose logs app
+  ```
+* **Database or Redis health check is blocking app startup:**
+  The `app` containers wait for both `db` and `redis` to be healthy before booting. If either service is unhealthy, the app containers will not start.
+  ```bash
+  docker compose logs db
+  docker compose logs redis
+  ```
+
+---
+
+### Symptom: Port 5000 Already in Use
+```text
+Error response from daemon: driver failed programming external connectivity on endpoint ... Bind for 0.0.0.0:5000 failed: port is already allocated
 ```
+
+### Causes & Fixes
+Another process or older container is already listening on host port `5000`.
+
+1. **Find and stop the conflicting process:**
+   ```bash
+   # Linux / macOS
+   lsof -i :5000
+   kill -9 <PID>
+
+   # Windows (PowerShell)
+   Get-Process -Id (Get-NetTCPConnection -LocalPort 5000).OwningProcess | Stop-Process
+   ```
+2. **Or re-map Nginx to an alternate host port in `docker-compose.yml`:**
+   ```yaml
+   nginx:
+     ports:
+       - "5001:80"  # Changes host entrypoint to http://localhost:5001
+   ```
+
+---
+
+## 2. Redis & Caching Issues
+
+### Symptom: Slow Redirects or Redis Connection Warnings in Logs
+```text
+redis.exceptions.ConnectionError: Error connecting to redis:6379. Connection refused.
+```
+
+### Causes & Fixes
+The application is designed with **graceful cache degradation**: if Redis goes down, the app automatically falls back to PostgreSQL without crashing, but latency will increase under heavy traffic.
+
+1. **Verify the Redis container is running and healthy:**
+   ```bash
+   docker compose ps redis
+   ```
+2. **Test Redis responsiveness:**
+   ```bash
+   docker compose exec redis redis-cli ping
+   # Expected response: PONG
+   ```
+3. **Inspect cached keys:**
+   ```bash
+   docker compose exec redis redis-cli keys "url:*"
+   ```
+4. **Flush stale or invalid cache data:**
+   ```bash
+   docker compose exec redis redis-cli flushall
+   ```
+
+---
+
+## 3. Database Connection Errors
+
+### Symptom: `/health` returns `503 Service Unavailable`
+```json
+{"status": "unavailable", "reason": "database unreachable"}
+```
+Or in the application logs:
+```text
 peewee.OperationalError: could not connect to server: Connection refused
 ```
 
-### Causes and fixes
+### Causes & Fixes
+1. **PostgreSQL container is stopped or unhealthy:**
+   ```bash
+   # Check PostgreSQL logs
+   docker compose logs db
 
-**PostgreSQL isn't running.**
-
-```bash
-# Check if it's up (Linux/Mac)
-pg_isready -U postgres
-
-# Start it (Mac with Homebrew)
-brew services start postgresql
-
-# Start it (Linux systemd)
-sudo systemctl start postgresql
-
-# Docker
-docker compose up -d db
-```
-
-**Wrong credentials or host in `.env`.**
-
-Open `.env` and confirm `DATABASE_HOST`, `DATABASE_PORT`, `DATABASE_USER`, and `DATABASE_PASSWORD` match your Postgres setup. See [CONFIG.md](CONFIG.md) for all variables and their defaults.
-
-**Database doesn't exist yet.**
-
-```bash
-createdb -U postgres hackathon_db
-```
-
-**Docker: app container started before the database was ready.**
-
-```bash
-docker compose down
-docker compose up -d
-```
-
-The `app` service has `depends_on: db: condition: service_healthy`, so it waits for `pg_isready` to pass. If you see this in a fresh `up`, it usually means Postgres took longer than expected — running `up` again after the db is healthy resolves it.
+   # Restart the database container
+   docker compose restart db
+   ```
+2. **Incorrect database credentials in `.env`:**
+   Ensure `DATABASE_HOST`, `DATABASE_PORT`, `DATABASE_USER`, and `DATABASE_PASSWORD` match your environment. In Docker, `DATABASE_HOST` must be `db` (not `localhost`).
+3. **Local development database missing:**
+   If running locally outside Docker, create the database manually:
+   ```bash
+   createdb -U postgres hackathon_db
+   ```
 
 ---
 
-## Port already in use
+## 4. Docker App Container Crash / Restart Loops
 
-### Symptom
-```
-OSError: [Errno 98] Address already in use
-```
+### Symptom: `docker compose ps` shows `app` restarting continuously
 
-### Fix
-
-Find what's using port 5000 and stop it, or run the app on a different port.
-
-```bash
-# Find the process
-lsof -i :5000          # Mac/Linux
-netstat -ano | findstr 5000   # Windows
-
-# Kill it (replace <PID> with the number from above)
-kill <PID>
-```
-
-To run on a different port, set the port in `run.py`:
-```python
-app.run(debug=True, port=5001)
-```
+### Causes & Fixes
+1. **Inspect logs for the specific stack trace:**
+   ```bash
+   docker compose logs -f app
+   ```
+2. **Missing Python dependency in the image:**
+   If dependencies in `pyproject.toml` changed, rebuild the container image:
+   ```bash
+   docker compose up -d --build --scale app=4
+   ```
+3. **Stale/Corrupted PostgreSQL Volume:**
+   If database schemas became corrupted during local development:
+   ```bash
+   # Warning: deletes local database volume data
+   docker compose down -v
+   docker compose up -d --build --scale app=4
+   ```
 
 ---
 
-## Short code returns 404 after creation
+## 5. Discord Webhook & Alerting Issues
+
+### Symptom: Automated Error Alerts Not Appearing in Discord
+
+### Causes & Fixes
+1. **Missing or invalid webhook URL:**
+   Confirm `DISCORD_WEBHOOK_URL` is populated in `.env`.
+2. **Test webhook delivery directly:**
+   ```bash
+   curl -X POST http://localhost:5000/alerts/test
+   ```
+   * If this returns `{"status": "ok"}`, the webhook URL and network egress are working.
+   * If this returns an error, verify the Discord webhook URL channel permissions.
+3. **Alert Cooldown Period Active:**
+   To prevent channel spamming during prolonged outages, `alerts.yml` enforces a cooldown window (default: 5 minutes) between repeated notifications.
+
+---
+
+## 6. Datadog APM & Metrics Issues
+
+### Symptom: Datadog Agent Logging API Key Errors
+
+### Causes & Fixes
+* **Missing `DD_API_KEY`:**
+  If you do not have a Datadog API key, the core application will continue serving traffic normally. Datadog agent log warnings can be ignored during offline development.
+* **Intake Site Mismatch:**
+  Verify that `DD_SITE` in `.env` matches your Datadog account region (e.g. `us3.datadoghq.com`, `datadoghq.com`, `datadoghq.eu`).
+
+---
+
+## 7. Short Code Returns 404 After Creation
 
 ### Symptom
-The app displays a short URL after submitting a link, but clicking it returns:
+Submitting a URL generates a short code, but visiting `http://localhost:5000/<short_code>` returns:
 ```json
 {"error": "short code not found"}
 ```
 
-### Fix
-
-This is most commonly caused by a stale server process that didn't pick up the latest code, or a failed database write that wasn't surfaced. Steps to diagnose:
-
-1. **Confirm the database is reachable:** `curl http://localhost:5000/health`
-2. **Restart the server** — in development, the auto-reloader occasionally gets into a bad state.
-3. **Check for database write errors** in the server logs. If `create_url` is silently failing after max retries, the response will still render but won't have a record backing it.
-
----
-
-## App returns HTTP 500 on every request
-
-### Symptom
-All endpoints return:
-```json
-{"error": "internal server error"}
-```
-
-### Fix
-
-1. Check the server logs for the actual exception — Flask logs the traceback to stderr.
-2. Common causes:
-   - Environment variable missing or misconfigured (see [CONFIG.md](CONFIG.md))
-   - Database connection lost mid-request (restart Postgres, then the app)
-   - Import error due to a missing dependency — run `uv sync` to reinstall
+### Causes & Fixes
+1. **Database Write Failure:**
+   If PostgreSQL was briefly unreachable or unique code collision retries were exhausted, check `docker compose logs app` for database write exceptions.
+2. **Redis / DB Desynchronization:**
+   If a short code was deleted from PostgreSQL directly, it may still exist in Redis or vice versa. Flush Redis cache to force database synchronization:
+   ```bash
+   docker compose exec redis redis-cli flushall
+   ```
 
 ---
 
-## `uv sync` fails or packages won't install
+## 8. Test Failures (`uv run pytest`)
 
-### Symptom
-```
-error: No solution found when resolving dependencies
-```
-or missing module errors when running the app.
+### Symptom: Database connection error during test runs
 
-### Fix
+### Causes & Fixes
+Tests run in your local Python environment and connect to PostgreSQL at `DATABASE_HOST=localhost:5432` by default.
 
-```bash
-# Ensure you're on Python 3.13
-python --version
-
-# Remove the virtual environment and reinstall from scratch
-rm -rf .venv
-uv sync
-```
-
----
-
-## Docker: app container keeps restarting
-
-### Symptom
-`docker compose ps` shows the `app` container in a restart loop.
-
-### Fix
-
-```bash
-# Inspect the logs for the actual error
-docker compose logs app
-
-# Common causes:
-# - DATABASE_PASSWORD mismatch between app and db services
-# - Port 5000 already in use on the host
-# - Corrupt image — rebuild it
-docker compose up -d --build
-```
-
----
-
-## Docker: database volume has stale/corrupt data
-
-### Symptom
-Postgres won't start, or the app crashes with schema errors after a code change.
-
-### Fix
-
-**Warning: this deletes all stored URLs.**
-
-```bash
-docker compose down -v   # removes the postgres_data volume
-docker compose up -d     # starts fresh with a clean database
-```
-
----
-
-## Tests fail with database errors
-
-### Symptom
-```
-peewee.OperationalError: ...
-```
-during `uv run pytest`.
-
-### Fix
-
-Tests require a running PostgreSQL instance. Set the following environment variables before running tests (or add them to your shell):
-
-```bash
-export DATABASE_NAME=hackathon_db
-export DATABASE_HOST=localhost
-export DATABASE_PORT=5432
-export DATABASE_USER=postgres
-export DATABASE_PASSWORD=postgres
-```
-
-Then rerun:
-```bash
-uv run pytest tests/ -v
-```
-
-In CI, these variables are injected automatically by the GitHub Actions workflow.
+1. Ensure a PostgreSQL instance is running and accessible on port `5432`.
+2. Ensure environment variables are loaded:
+   ```bash
+   cp .env.example .env
+   ```
+3. Run the test suite:
+   ```bash
+   uv run pytest tests/ -v
+   ```
