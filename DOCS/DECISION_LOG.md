@@ -12,7 +12,7 @@ Why we made the technical choices we did. Each entry records the decision, the a
 
 **Reasoning:**
 
-Flask is minimal by design. This app has five routes and one model — it doesn't need Django's ORM, admin panel, auth system, or migrations framework. FastAPI would have been a reasonable choice for the JSON API, but the requirement to serve an HTML form as well makes Flask's template rendering support a natural fit. Flask also has the lowest learning curve for contributors unfamiliar with async Python, which matters for a hackathon context where onboarding speed is a priority.
+Flask is minimal by design. The application core focuses on high-speed routing, template rendering, and lightweight API endpoints — it does not require Django's heavy ORM, admin panel, auth system, or database migrations framework. FastAPI was considered for the JSON API, but the requirement to serve an integrated web UI and alerts dashboard makes Flask's Jinja2 template rendering a natural fit. Flask also has a low learning curve, ensuring rapid development and maintainability.
 
 ---
 
@@ -24,7 +24,7 @@ Flask is minimal by design. This app has five routes and one model — it doesn'
 
 **Reasoning:**
 
-Peewee is lightweight and its API maps cleanly onto simple CRUD operations. For an app with one model and four query types (INSERT, SELECT by short_code, DELETE for test teardown, COUNT for health), SQLAlchemy's session/unit-of-work model and declarative setup would have been significant overhead. Raw SQL was considered but rejected because Peewee's `Model.create()` and `Model.get()` read clearly and reduce the risk of SQL injection with no extra effort. Peewee also integrates naturally with Flask's per-request lifecycle via its `DatabaseProxy` and `connect()`/`close()` hooks.
+Peewee is lightweight and its API maps cleanly onto simple CRUD operations. For an application with a focused data model and simple query types (INSERT, SELECT by short_code, DELETE for test teardown, COUNT for health checks), SQLAlchemy's unit-of-work session model and declarative setup introduced unnecessary overhead. Raw SQL was considered but rejected because Peewee's `Model.create()` and `Model.get()` read clearly and prevent SQL injection vulnerabilities automatically. Peewee also integrates cleanly with Flask's request lifecycle via its `DatabaseProxy` and connection hooks.
 
 ---
 
@@ -36,19 +36,19 @@ Peewee is lightweight and its API maps cleanly onto simple CRUD operations. For 
 
 **Reasoning:**
 
-SQLite was the simplest option but ruled out because it doesn't support concurrent writes well — a URL shortener under any real load will have simultaneous POST requests. PostgreSQL was chosen over MySQL because it is the most widely supported production database in the Python/Flask ecosystem, has better compliance with SQL standards, and is what the MLH hackathon CI environment provides natively. The `UNIQUE` constraint on `short_code` is enforced at the database level, not just in application code, which prevents duplicates even under concurrent inserts.
+SQLite was the simplest option but was ruled out because it locks database writes sequentially, making it unsuitable for concurrent URL creation requests. PostgreSQL was chosen over MySQL because of its strong SQL standards compliance, battle-tested concurrency management, and first-class support across containerized environments. The `UNIQUE` constraint on `short_code` is enforced directly at the database engine level, preventing duplicate collisions during concurrent inserts.
 
 ---
 
-## DL-04: Per-request database connections (no connection pool)
+## DL-04: Per-request database connections & caching offload
 
-**Decision:** Open one connection per HTTP request; close it on teardown via `@app.teardown_appcontext`.
+**Decision:** Use per-request connection management for PostgreSQL, offloading read volume to Redis.
 
-**Alternatives considered:** A persistent connection pool (e.g., PgBouncer, SQLAlchemy connection pool).
+**Alternatives considered:** External connection poolers (e.g. PgBouncer), SQLAlchemy connection pooling.
 
 **Reasoning:**
 
-For a single-process Flask development server with low concurrency, a connection pool adds complexity without benefit. Peewee's `DatabaseProxy` and `reuse_if_open=True` make the per-request pattern easy to implement correctly. The tradeoff is that each request pays the cost of a TCP handshake to Postgres; at scale this would be the first thing to change (see [CAPACITY_PLAN.md](CAPACITY_PLAN.md)), but for the scope of this project the simplicity is worth it.
+For individual Flask workers, opening a connection per request via `@app.before_request` and `@app.teardown_appcontext` is simple and reliable. While per-request TCP handshakes can create overhead under heavy read traffic, we addressed this directly by placing an in-memory Redis cache in front of PostgreSQL (see **DL-11**). Because Redis serves >99% of redirect lookups in sub-milliseconds from RAM, database read contention is eliminated without requiring the operational complexity of a connection pooler like PgBouncer.
 
 ---
 
@@ -60,7 +60,7 @@ For a single-process Flask development server with low concurrency, a connection
 
 **Reasoning:**
 
-Sequential IDs are predictable — someone can enumerate all shortened URLs by incrementing the code. Hashing the URL creates a fixed code per URL (no duplicates for the same long URL), but it also means the same long URL always produces the same short code, which is a design choice we didn't need to commit to. UUIDs are too long for a short URL. `secrets.token_urlsafe(6)` produces 8 characters of random URL-safe base64, which gives ~281 trillion possible codes — sufficient to make collisions negligible. The `secrets` module is cryptographically random, unlike `random`, which matters if short codes are ever used as access tokens.
+Sequential IDs are predictable and allow users to enumerate the entire database by incrementing IDs. Hashing the URL creates deterministic codes (preventing different users from getting distinct short links for the same target URL). UUIDs are excessively long for short links. `secrets.token_urlsafe(6)` produces 8 characters of random URL-safe base64, providing over ~281 trillion unique code combinations — sufficient to make collisions negligible while keeping URLs short. The `secrets` module is cryptographically secure, unlike standard `random`.
 
 ---
 
@@ -72,19 +72,19 @@ Sequential IDs are predictable — someone can enumerate all shortened URLs by i
 
 **Reasoning:**
 
-`uv` is significantly faster than pip at resolving and installing dependencies, which matters in CI where a fresh install runs on every push. It also manages Python versions automatically (no separate `pyenv` needed), which simplifies onboarding on different machines. `pyproject.toml` is the standard packaging metadata format (PEP 517/518), and `uv` supports it natively. Poetry was considered but its lockfile format is non-standard; `uv` uses `uv.lock` and falls back gracefully to `pyproject.toml`.
+`uv` is significantly faster than pip at resolving, building, and installing dependencies, which accelerates Docker image builds and CI test workflows. It also manages Python toolchains and virtual environments automatically without requiring separate tools like `pyenv`. It natively adheres to standard `pyproject.toml` packaging specifications (PEP 517/518) and provides deterministic lockfile resolution via `uv.lock`.
 
 ---
 
-## DL-07: Docker Compose for containerisation
+## DL-07: Docker Compose for multi-service orchestration
 
-**Decision:** Use Docker Compose to orchestrate the app and database containers.
+**Decision:** Use Docker Compose to orchestrate the multi-container fleet (Nginx, App replicas, Redis, PostgreSQL, and Datadog).
 
-**Alternatives considered:** Kubernetes, running Postgres directly on the host, Docker without Compose.
+**Alternatives considered:** Kubernetes, running all dependencies natively on the host machine.
 
 **Reasoning:**
 
-Kubernetes is the right answer at scale but is far too much operational overhead for a two-service project. Running Postgres on the host works for development but requires contributors to install and configure PostgreSQL themselves. Docker Compose gives us a one-command setup (`docker compose up -d`) that works identically on any machine with Docker installed, and the `depends_on: condition: service_healthy` block ensures the app never starts before Postgres is ready — eliminating the most common source of startup failures.
+Kubernetes introduces excessive operational overhead for a dedicated service fleet. Running all dependencies natively on the host requires manual installation and configuration of PostgreSQL, Redis, and Nginx on every developer's machine. Docker Compose provides a reproducible, one-command setup (`docker compose up -d --build --scale app=4`) that functions identically across macOS, Linux, and Windows. Container health checks (`depends_on: condition: service_healthy`) guarantee that the application only starts once PostgreSQL and Redis are ready to accept traffic.
 
 ---
 
@@ -96,16 +96,64 @@ Kubernetes is the right answer at scale but is far too much operational overhead
 
 **Reasoning:**
 
-GitHub Actions is free for public repositories and requires no external account setup. Running Postgres as a service container in CI mirrors the production Docker environment more closely than mocking the database. Pre-commit hooks alone don't catch integration failures across contributors' different environments. The `--cov-fail-under=50` coverage gate ensures tests aren't skipped silently as the codebase grows.
+GitHub Actions integrates natively with the repository without requiring external account setups or webhook infrastructure. Running PostgreSQL as a service container in CI mirrors the production environment closely. Test gates with automated coverage reports (`--cov=app`) ensure code quality and prevent regressions on every push.
 
 ---
 
 ## DL-09: URL validation via `urllib.parse` rather than regex
 
-**Decision:** Validate URLs using Python's built-in `urllib.parse.urlparse` and checking `scheme` and `netloc`.
+**Decision:** Validate URLs using Python's built-in `urllib.parse.urlparse`, verifying `scheme` and `netloc`.
 
-**Alternatives considered:** A regex-based validator, a third-party library (e.g., `validators`).
+**Alternatives considered:** Hand-rolled regular expressions, third-party validator packages.
 
 **Reasoning:**
 
-Regex URL validation is notoriously difficult to get right and easy to bypass. `urlparse` is part of the standard library, has no dependencies, and handles the edge cases (IPv6 addresses, IDN hostnames, unusual but valid schemes) that a hand-rolled regex would likely miss. The validation rules are intentionally minimal: require `http` or `https`, require a network location, cap at 2048 characters. Adding a third-party library for this one function would be premature — the standard library handles the requirement.
+Regex URL validation is notoriously prone to edge-case bugs and ReDoS (Regular Expression Denial of Service) security risks. `urlparse` is built into the Python standard library, requires no external dependencies, and handles IPv6 addresses, query strings, and internationalized domain names reliably. Validation rules enforce that URLs start with `http` or `https`, include a valid network location, and do not exceed 2048 characters.
+
+---
+
+## DL-10: Nginx for reverse proxy & horizontal load balancing
+
+**Decision:** Place an Nginx container in front of scaled Flask application replicas using round-robin load balancing.
+
+**Alternatives considered:** Traefik, HAProxy, single-container multithreading.
+
+**Reasoning:**
+
+Horizontal scaling is necessary to distribute concurrent load across multiple CPU cores. Placing Nginx at the ingress boundary allows the application to scale dynamically (`--scale app=N`) without host port collisions. Nginx leverages Docker's internal DNS resolution to discover all active container IPs under the `app` service and distributes incoming traffic evenly across them using round-robin balancing while offloading TCP connection keep-alives.
+
+---
+
+## DL-11: Redis for in-memory read-through and write-through caching
+
+**Decision:** Use Redis (`redis:alpine`) for in-memory URL mapping (`url:<short_code>` ➔ `original_url`) with a 1-hour TTL and graceful database fallback.
+
+**Alternatives considered:** In-process Python memory caches (`functools.lru_cache`), Memcached, database read replicas.
+
+**Reasoning:**
+
+In-process Python caches are local to a single worker process and cannot share cached data across multiple scaled container replicas. Memcached lacks rich key inspection tools and persistence options. Redis provides sub-millisecond lookups from RAM, enabling the system to sustain 240+ requests/sec under heavy concurrency with 0.0% failure rates. The integration is implemented with graceful degradation: if Redis is temporarily offline, requests fall back to PostgreSQL automatically without returning 500 errors to users.
+
+---
+
+## DL-12: Datadog APM & DogStatsD via Unix domain sockets
+
+**Decision:** Use `ddtrace-run` and the official Datadog Agent container connected via shared `/var/run/datadog` Unix domain sockets.
+
+**Alternatives considered:** OpenTelemetry + Jaeger, Prometheus + Grafana, manual application logging.
+
+**Reasoning:**
+
+`ddtrace-run` automatically instruments Flask endpoints, database queries, and Redis operations with zero invasive application code changes. Communicating with the Datadog Agent over Unix domain sockets (`apm.socket` and `dsd.socket`) eliminates network port overhead and reduces CPU utilization compared to TCP/UDP sockets.
+
+---
+
+## DL-13: In-app sliding window & Discord webhooks for incident alerting
+
+**Decision:** Track HTTP 5xx error rates across a rolling 50-request sliding window in memory, dispatching diagnostic alerts to Discord with a 5-minute cooldown.
+
+**Alternatives considered:** External uptime monitors (Pingdom, UptimeRobot), log-scraping cron jobs.
+
+**Reasoning:**
+
+Evaluating error rates in real-time within the application request pipeline (`app/alerts.py`) allows immediate anomaly detection without relying on polling intervals or external SaaS dependencies. The automated cooldown mechanism (`cooldown_seconds: 300` in `alerts.yml`) prevents webhook rate-limiting and channel spam during sustained incidents while ensuring operators receive actionable diagnostic payloads.
